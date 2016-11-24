@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<package>
+  <name>ubd_scene_image_comparator</name>
+  <version>1.0.0</version>
+  <description>The ubd_scene_image_comparator package</description>
+
+  <maintainer email="fxj345@cs.bham.ac.uk">Ferdian Jovan</maintainer>
+
+  <license>MIT</license>
+
+  <author email="fxj345@cs.bham.ac.uk">Ferdian Jovan</author>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  <build_depend>mongodb_store</build_depend>
+  <build_depend>rospy</build_depend>
+  <build_depend>sensor_msgs</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <build_depend>geometry_msgs</build_depend>
+  <build_depend>message_generation</build_depend>
+  <build_depend>simple_change_detector</build_depend>
+  <build_depend>vision_people_logging</build_depend>
+  <run_depend>mongodb_store</run_depend>
+  <run_depend>rospy</run_depend>
+  <run_depend>sensor_msgs</run_depend>
+  <run_depend>std_msgs</run_depend>
+  <run_depend>geometry_msgs</run_depend>
+  <run_depend>message_runtime</run_depend>
+  <run_depend>simple_change_detector</run_depend>
+  <run_depend>vision_people_logging</run_depend>
+
+  <export>
+  </export>
+</package>

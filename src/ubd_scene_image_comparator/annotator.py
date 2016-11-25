@@ -24,7 +24,7 @@ class DetectionImageAnnotator(object):
 
     def load_accuracy(self):
         log = self._db_store.query(
-            UbdSceneAccuracy._type, sort_query=[("header.stamp.secs", 1)],
+            UbdSceneAccuracy._type, sort_query=[("header.stamp.secs", -1)],
             limit=1
         )
         if len(log):
@@ -53,7 +53,8 @@ class DetectionImageAnnotator(object):
         log = UbdSceneAccuracy(
             header, self.activity["Present"], self.activity["Absent"],
             self.ubd["TP"], self.ubd["FN"], self.ubd["FP"], self.ubd["TN"],
-            self.change["TP"], self.change["FN"], self.change["FP"], self.change["TN"]
+            self.change["TP"], self.change["FN"],
+            self.change["FP"], self.change["TN"]
         )
         self._db_store.insert(log)
 
@@ -71,6 +72,9 @@ class DetectionImageAnnotator(object):
             # projection_query={"robot_data": 0, "skeleton_data": 0}
             for log in logs:
                 self._img = log[0].image
+                rospy.loginfo(
+                    "Please wait until the new image appears before answering"
+                )
                 timestamp = log[0].header.stamp
                 datestamp = datetime.datetime.fromtimestamp(timestamp.secs)
                 text = "Could you see if there is an activity going on "

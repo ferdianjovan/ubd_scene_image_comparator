@@ -55,7 +55,7 @@ class DetectionImageLogger(object):
             )
         ]
         ts = message_filters.ApproximateTimeSynchronizer(
-            subs, queue_size=1, slop=0.15
+            subs, queue_size=5, slop=0.5
         )
         ts.registerCallback(self.cb)
         rospy.Timer(rospy.Duration(60), self.to_log)
@@ -86,8 +86,8 @@ class DetectionImageLogger(object):
         rospy.sleep(1)
 
     def cb(self, cd, ubd, img):
-        self.ubd.append(ubd.ubd_pos)
-        self.change.append(cd.object_centroids)
+        self.ubd.extend(ubd.ubd_pos)
+        self.change.extend(cd.object_centroids)
         self.img = img
 
     def to_log(self, timer_event):
@@ -95,15 +95,16 @@ class DetectionImageLogger(object):
         if not_moving:
             now = rospy.Time.now()
             date_now = datetime.datetime.fromtimestamp(now.secs)
-            rospy.loginfo(
-                "Got to log at %s with %d ubd detections and %d scene detections" % (
-                    str(date_now), len(self.ubd), len(self.change)
-                )
-            )
             header = Header(self._counter, now, "")
             self._counter += 1
             log = UbdSceneImgLog(header, self.img, self.ubd, self.change, False)
-            self._db.insert(log)
+            if log.image != Image():
+                rospy.loginfo(
+                    "Got to log at %s with %d ubd detections and %d scene detections" % (
+                        str(date_now), len(self.ubd), len(self.change)
+                    )
+                )
+                self._db.insert(log)
             self.img = Image()
             self.ubd = list()
             self.change = list()

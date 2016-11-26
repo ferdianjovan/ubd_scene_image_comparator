@@ -7,6 +7,7 @@ find_package(catkin REQUIRED COMPONENTS
   sensor_msgs
   std_msgs
   geometry_msgs
+  visualization_msgs
   message_generation
   simple_change_detector
   vision_people_logging
@@ -58,7 +59,7 @@ generate_messages(
 catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES ubd_scene_image_comparator
-  CATKIN_DEPENDS mongodb_store rospy sensor_msgs std_msgs geometry_msgs message_runtime simple_change_detector vision_people_logging
+  CATKIN_DEPENDS mongodb_store rospy sensor_msgs std_msgs geometry_msgs message_runtime simple_change_detector vision_people_logging visualization_msgs
 #  DEPENDS system_lib
 )
 

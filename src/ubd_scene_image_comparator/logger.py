@@ -15,7 +15,7 @@ from mongodb_store.message_store import MessageStoreProxy
 
 class DetectionImageLogger(object):
 
-    def __init__(self, wait_time=30):
+    def __init__(self, wait_time=60):
         self._counter = 0
         self.img = Image()
         self.ubd = list()
@@ -55,7 +55,7 @@ class DetectionImageLogger(object):
             )
         ]
         ts = message_filters.ApproximateTimeSynchronizer(
-            subs, queue_size=5, slop=0.5
+            subs, queue_size=1, slop=0.5
         )
         ts.registerCallback(self.cb)
         rospy.Timer(rospy.Duration(60), self.to_log)

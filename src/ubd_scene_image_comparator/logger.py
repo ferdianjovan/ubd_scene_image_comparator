@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import rospy
+import argparse
 import datetime
 import message_filters
 from std_msgs.msg import Header
@@ -114,5 +115,11 @@ class DetectionImageLogger(object):
 
 if __name__ == '__main__':
     rospy.init_node("ubd_scene_img_logger")
-    DetectionImageLogger()
+    parser = argparse.ArgumentParser(prog=rospy.get_name())
+    parser.add_argument(
+        "-w", dest="wait_time", default="60",
+        help="Waiting time before logging, default 60 seconds"
+    )
+    args = parser.parse_args()
+    DetectionImageLogger(wait_time=int(args.wait_time))
     rospy.spin()

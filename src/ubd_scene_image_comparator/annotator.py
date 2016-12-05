@@ -128,6 +128,8 @@ class DetectionImageAnnotator(object):
             # projection_query={"robot_data": 0, "skeleton_data": 0}
             for log in logs:
                 self._img = log[0].image
+                self._ubd = log[0].ubd_pos
+                self._cd = log[0].cd_pos
                 rospy.loginfo(
                     "Please wait until the new image appears before answering"
                 )
@@ -135,15 +137,14 @@ class DetectionImageAnnotator(object):
                 datestamp = datetime.datetime.fromtimestamp(timestamp.secs)
                 text = "Could you see if there is an activity going on "
                 text += "within a minute around %s " % str(datestamp)
-                text += "in image topic %s? [1/0]" % rospy.get_name()
+                text += "in image topic %s? [1/0/-1]" % rospy.get_name()
                 inpt = raw_input(text)
-                while not (inpt == "1" or inpt == "0"):
+                while not (inpt == "1" or inpt == "0" or inpt == "-1"):
                     inpt = raw_input(
-                        "Please, answer 1 for an activity, 0 for not activity"
+                        "Please, answer 1 for an activity, 0 for not activity, and -1 for invalid data"
                     )
-                if int(inpt):
+                if int(inpt) == 1:
                     self.activity["Present"] += 1
-                    self._ubd = log[0].ubd_pos
                     text = "Could you see if the upper body detections"
                     text += "are in the activity area in marker topic "
                     text += "%s? [1/0]" % (rospy.get_name() + "/ubd_marker")
@@ -156,7 +157,6 @@ class DetectionImageAnnotator(object):
                         self.ubd["TP"] += 1
                     else:
                         self.ubd["FN"] += 1
-                    self._cd = log[0].cd_pos
                     text = "Could you see if the scene detections"
                     text += "are in the activity area in marker topic "
                     text += "%s? [1/0]" % (rospy.get_name() + "/cd_marker")
@@ -169,7 +169,7 @@ class DetectionImageAnnotator(object):
                         self.change["TP"] += 1
                     else:
                         self.change["FN"] += 1
-                else:
+                elif int(inpt) == 0:
                     self.activity["Absent"] += 1
                     if len(log[0].ubd_pos):
                         self.ubd["FP"] += 1

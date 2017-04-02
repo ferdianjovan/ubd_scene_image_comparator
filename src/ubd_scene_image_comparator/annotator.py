@@ -128,6 +128,8 @@ class DetectionImageAnnotator(object):
             # projection_query={"robot_data": 0, "skeleton_data": 0}
             for log in logs:
                 self._img = log[0].image
+                self._ubd = log[0].ubd_pos
+                self._cd = log[0].cd_pos
                 rospy.loginfo(
                     "Please wait until the new image appears before answering"
                 )
@@ -143,7 +145,6 @@ class DetectionImageAnnotator(object):
                     )
                 if int(inpt):
                     self.activity["Present"] += 1
-                    self._ubd = log[0].ubd_pos
                     text = "Could you see if the upper body detections"
                     text += "are in the activity area in marker topic "
                     text += "%s? [1/0]" % (rospy.get_name() + "/ubd_marker")
@@ -156,7 +157,6 @@ class DetectionImageAnnotator(object):
                         self.ubd["TP"] += 1
                     else:
                         self.ubd["FN"] += 1
-                    self._cd = log[0].cd_pos
                     text = "Could you see if the scene detections"
                     text += "are in the activity area in marker topic "
                     text += "%s? [1/0]" % (rospy.get_name() + "/cd_marker")

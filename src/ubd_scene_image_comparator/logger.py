@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import rospy
+import argparse
 import datetime
 import message_filters
 from std_msgs.msg import Header
@@ -15,7 +16,7 @@ from mongodb_store.message_store import MessageStoreProxy
 
 class DetectionImageLogger(object):
 
-    def __init__(self, wait_time=30):
+    def __init__(self, wait_time=60):
         self._counter = 0
         self.img = Image()
         self.ubd = list()
@@ -55,7 +56,7 @@ class DetectionImageLogger(object):
             )
         ]
         ts = message_filters.ApproximateTimeSynchronizer(
-            subs, queue_size=5, slop=0.5
+            subs, queue_size=1, slop=0.5
         )
         ts.registerCallback(self.cb)
         rospy.Timer(rospy.Duration(60), self.to_log)
@@ -114,5 +115,11 @@ class DetectionImageLogger(object):
 
 if __name__ == '__main__':
     rospy.init_node("ubd_scene_img_logger")
-    DetectionImageLogger()
+    parser = argparse.ArgumentParser(prog=rospy.get_name())
+    parser.add_argument(
+        "-w", dest="wait_time", default="60",
+        help="Waiting time before logging, default 60 seconds"
+    )
+    args = parser.parse_args()
+    DetectionImageLogger(wait_time=int(args.wait_time))
     rospy.spin()

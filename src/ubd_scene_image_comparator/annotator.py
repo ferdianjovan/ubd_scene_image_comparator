@@ -2,21 +2,31 @@
 
 import rospy
 import datetime
+import argparse
 from std_msgs.msg import Header
 from sensor_msgs.msg import Image
+from region_observation.util import get_soma_info
 from visualization_msgs.msg import Marker, MarkerArray
 from mongodb_store.message_store import MessageStoreProxy
+from region_observation.util import create_line_string, is_intersected
 from ubd_scene_image_comparator.msg import UbdSceneImgLog, UbdSceneAccuracy
 
 
 class DetectionImageAnnotator(object):
 
-    def __init__(self):
+    def __init__(self, config):
+        self.regions, self.map = get_soma_info(config)
         self._stop = False
         self._img = Image()
-        self.activity = {"Present": 0, "Absent": 0}
-        self.ubd = {"TP": 0, "FN": 0, "FP": 0, "TN": 0}
-        self.change = {"TP": 0, "FN": 0, "FP": 0, "TN": 0}
+        self.activity = {
+            roi: {"Present": 0, "Absent": 0} for roi in self.regions.keys()
+        }
+        self.ubd = {
+            roi: {"TP": 0, "FN": 0, "FP": 0, "TN": 0} for roi in self.regions.keys()
+        }
+        self.cd = {
+            roi: {"TP": 0, "FN": 0, "FP": 0, "TN": 0} for roi in self.regions.keys()
+        }
         self._db = MessageStoreProxy(collection="ubd_scene_log")
         self._db_store = MessageStoreProxy(collection="ubd_scene_accuracy")
         # visualisation stuff
@@ -35,40 +45,47 @@ class DetectionImageAnnotator(object):
         rospy.Timer(rospy.Duration(0.1), self.pub_img)
 
     def load_accuracy(self):
-        log = self._db_store.query(
-            UbdSceneAccuracy._type, sort_query=[("header.stamp.secs", -1)],
-            limit=1
+        logs = self._db_store.query(
+            UbdSceneAccuracy._type,
+            message_query={"map": self.map},
+            sort_query=[("header.stamp.secs", -1)],
+            limit=len(self.regions.keys())
         )
-        if len(log):
-            log = log[0][0]
-            self.activity["Present"] = log.activity_present
-            self.activity["Absent"] = log.activity_absent
-            self.ubd["TP"] = log.ubd_tp
-            self.ubd["FN"] = log.ubd_fn
-            self.ubd["FP"] = log.ubd_fp
-            self.ubd["TN"] = log.ubd_tn
-            self.change["TP"] = log.cd_tp
-            self.change["FN"] = log.cd_fn
-            self.change["FP"] = log.cd_fp
-            self.change["TN"] = log.cd_tn
+        used_rois = list()
+        for log in logs:
+            log = log[0]
+            if log.region_id in used_rois:
+                continue
+            self.activity[log.region_id]["Present"] = log.activity_present
+            self.activity[log.region_id]["Absent"] = log.activity_absent
+            self.ubd[log.region_id]["TP"] = log.ubd_tp
+            self.ubd[log.region_id]["FN"] = log.ubd_fn
+            self.ubd[log.region_id]["FP"] = log.ubd_fp
+            self.ubd[log.region_id]["TN"] = log.ubd_tn
+            self.cd[log.region_id]["TP"] = log.cd_tp
+            self.cd[log.region_id]["FN"] = log.cd_fn
+            self.cd[log.region_id]["FP"] = log.cd_fp
+            self.cd[log.region_id]["TN"] = log.cd_tn
+            used_rois.append(log.region_id)
         rospy.loginfo("Loading...")
         rospy.loginfo("Activity: %s" % str(self.activity))
         rospy.loginfo("UBD: %s" % str(self.ubd))
-        rospy.loginfo("Scene: %s" % str(self.change))
+        rospy.loginfo("Scene: %s" % str(self.cd))
 
     def save_accuracy(self):
         header = Header(1, rospy.Time.now(), "")
         rospy.loginfo("Storing...")
         rospy.loginfo("Activity: %s" % str(self.activity))
         rospy.loginfo("UBD: %s" % str(self.ubd))
-        rospy.loginfo("Scene: %s" % str(self.change))
-        log = UbdSceneAccuracy(
-            header, self.activity["Present"], self.activity["Absent"],
-            self.ubd["TP"], self.ubd["FN"], self.ubd["FP"], self.ubd["TN"],
-            self.change["TP"], self.change["FN"],
-            self.change["FP"], self.change["TN"]
-        )
-        self._db_store.insert(log)
+        rospy.loginfo("Scene: %s" % str(self.cd))
+        for roi in self.regions.keys():
+            log = UbdSceneAccuracy(
+                header, self.activity[roi]["Present"], self.activity[roi]["Absent"],
+                self.ubd[roi]["TP"], self.ubd[roi]["FN"], self.ubd[roi]["FP"], self.ubd[roi]["TN"],
+                self.cd[roi]["TP"], self.cd[roi]["FN"],
+                self.cd[roi]["FP"], self.cd[roi]["TN"], roi, self.map
+            )
+            self._db_store.insert(log)
 
     def pub_img(self, timer_event):
         self._pub.publish(self._img)
@@ -117,10 +134,87 @@ class DetectionImageAnnotator(object):
                 markers.markers.append(marker)
         return markers
 
+    def _ubd_annotation(self, log, activity_rois=list(), nonactivity_rois=list()):
+        ubd_rois = list()
+        for centroid in log[0].ubd_pos:
+            point = create_line_string([centroid.x, centroid.y])
+            for roi, region in self.regions.iteritems():
+                if is_intersected(region, point):
+                    ubd_rois.append(roi)
+        for roi in activity_rois:
+            if roi in ubd_rois:
+                self.ubd[roi]["TP"] += 1
+            else:
+                self.ubd[roi]["FN"] += 1
+        for roi in nonactivity_rois:
+            if roi in ubd_rois:
+                self.ubd[roi]["FP"] += 1
+            else:
+                self.ubd[roi]["TN"] += 1
+
+    def _cd_annotation(self, log, activity_rois=list(), nonactivity_rois=list()):
+        cd_rois = list()
+        for centroid in log[0].cd_pos:
+            point = create_line_string([centroid.x, centroid.y])
+            for roi, region in self.regions.iteritems():
+                if is_intersected(region, point):
+                    cd_rois.append(roi)
+        for roi in activity_rois:
+            if roi in cd_rois:
+                self.cd[roi]["TP"] += 1
+            else:
+                self.cd[roi]["FN"] += 1
+        for roi in nonactivity_rois:
+            if roi in cd_rois:
+                self.cd[roi]["FP"] += 1
+            else:
+                self.cd[roi]["TN"] += 1
+
+    def _activity_annotation(self, log):
+        act_rois = list()
+        rospy.logwarn(
+            "Please wait until the new image appears before answering..."
+        )
+        rospy.logwarn(
+            "All questions are based on the image topic %s" % rospy.get_name()
+        )
+        timestamp = log[0].header.stamp
+        datestamp = datetime.datetime.fromtimestamp(timestamp.secs)
+        # listing all regions which activity happened from the image
+        text = "Which regions did the activity happen within a minute around %s? \n" % str(datestamp)
+        text += "Please select from %s, " % str(self.regions.keys())
+        text += "and write in the following format '[reg_1,...,reg_n]'\n"
+        text += "(Press ENTER if no activity is observed): "
+        inpt = raw_input(text)
+        inpt = inpt.replace(" ", "")
+        inpt = inpt.replace("[", "")
+        inpt = inpt.replace("]", "")
+        act_rois = inpt.split(",")
+        if '' in act_rois and len(act_rois) == 1:
+            act_rois = list()
+        for roi in act_rois:
+            self.activity[roi]["Present"] += 1
+        # listing all regions which no activity happening from the image
+        text = "Which regions with no activity within a minute around %s? \n" % str(datestamp)
+        text += "Please select from %s, " % str(self.regions.keys())
+        text += "and write in the following format '[reg_1,...,reg_n]'\n"
+        text += "(Press ENTER if all regions had an activity): "
+        inpt = raw_input(text)
+        inpt = inpt.replace(" ", "")
+        inpt = inpt.replace("[", "")
+        inpt = inpt.replace("]", "")
+        nact_rois = inpt.split(",")
+        if '' in nact_rois and len(nact_rois) == 1:
+            nact_rois = list()
+        for roi in nact_rois:
+            self.activity[roi]["Absent"] += 1
+        return act_rois, nact_rois
+
     def annotate(self):
         while not rospy.is_shutdown() and not self._stop:
             logs = self._db.query(
-                UbdSceneImgLog._type, {"annotated": False}, limit=10
+                # UbdSceneImgLog._type, {"annotated": False}, limit=10
+                UbdSceneImgLog._type, {"annotated": False}, limit=3  # TESTING PURPOSE
             )
             rospy.loginfo(
                 "Getting %d logs from ubd_scene_log collection" % len(logs)
@@ -130,60 +224,18 @@ class DetectionImageAnnotator(object):
                 self._img = log[0].image
                 self._ubd = log[0].ubd_pos
                 self._cd = log[0].cd_pos
-                rospy.loginfo(
-                    "Please wait until the new image appears before answering"
-                )
-                timestamp = log[0].header.stamp
-                datestamp = datetime.datetime.fromtimestamp(timestamp.secs)
-                text = "Could you see if there is an activity going on "
-                text += "within a minute around %s " % str(datestamp)
-                text += "in image topic %s? [1/0/-1]" % rospy.get_name()
-                inpt = raw_input(text)
-                while not (inpt == "1" or inpt == "0" or inpt == "-1"):
-                    inpt = raw_input(
-                        "Please, answer 1 for an activity, 0 for not activity, and -1 for invalid data"
-                    )
-                if int(inpt) == 1:
-                    self.activity["Present"] += 1
-                    text = "Could you see if the upper body detections"
-                    text += "are in the activity area in marker topic "
-                    text += "%s? [1/0]" % (rospy.get_name() + "/ubd_marker")
-                    inpt = raw_input(text)
-                    while not (inpt == "1" or inpt == "0"):
-                        inpt = raw_input(
-                            "Please, answer 1 for yes, 0 for no"
-                        )
-                    if int(inpt):
-                        self.ubd["TP"] += 1
-                    else:
-                        self.ubd["FN"] += 1
-                    text = "Could you see if the scene detections"
-                    text += "are in the activity area in marker topic "
-                    text += "%s? [1/0]" % (rospy.get_name() + "/cd_marker")
-                    inpt = raw_input(text)
-                    while not (inpt == "1" or inpt == "0"):
-                        inpt = raw_input(
-                            "Please, answer 1 for yes, 0 for no"
-                        )
-                    if int(inpt):
-                        self.change["TP"] += 1
-                    else:
-                        self.change["FN"] += 1
-                elif int(inpt) == 0:
-                    self.activity["Absent"] += 1
-                    if len(log[0].ubd_pos):
-                        self.ubd["FP"] += 1
-                    else:
-                        self.ubd["TN"] += 1
-                    if len(log[0].cd_pos):
-                        self.change["FP"] += 1
-                    else:
-                        self.change["TN"] += 1
+                # annotation part
+                act_rois, nact_rois = self._activity_annotation(log)
+                self._ubd_annotation(log, act_rois, nact_rois)
+                self._cd_annotation(log, act_rois, nact_rois)
+                # resetting
                 self._cd = list()
                 self._ubd = list()
                 log[0].annotated = True
                 self._db.update(
-                    log[0], message_query={"header.stamp.secs": timestamp.secs}
+                    log[0], message_query={
+                        "header.stamp.secs": log[0].header.stamp.secs
+                    }
                 )
                 rospy.sleep(1)
             inpt = raw_input("Stop now? [1/0]")
@@ -200,6 +252,9 @@ class DetectionImageAnnotator(object):
 
 if __name__ == '__main__':
     rospy.init_node("ubd_scene_annotator")
-    dia = DetectionImageAnnotator()
+    parser = argparse.ArgumentParser(prog=rospy.get_name())
+    parser.add_argument("soma_config", help="Soma configuration")
+    args = parser.parse_args()
+    dia = DetectionImageAnnotator(args.soma_config)
     dia.annotate()
     rospy.spin()

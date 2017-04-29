@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 2.8.3)
 project(ubd_scene_image_comparator)
 
 find_package(catkin REQUIRED COMPONENTS
+  region_observation
   mongodb_store
   rospy
   sensor_msgs
@@ -59,7 +60,7 @@ generate_messages(
 catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES ubd_scene_image_comparator
-  CATKIN_DEPENDS mongodb_store rospy sensor_msgs std_msgs geometry_msgs message_runtime simple_change_detector vision_people_logging visualization_msgs
+  CATKIN_DEPENDS mongodb_store rospy sensor_msgs std_msgs geometry_msgs message_runtime simple_change_detector vision_people_logging visualization_msgs region_observation
 #  DEPENDS system_lib
 )
 

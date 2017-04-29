@@ -9,3 +9,5 @@ int32 cd_tp
 int32 cd_fn
 int32 cd_fp
 int32 cd_tn
+string region_id
+string map

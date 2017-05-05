@@ -213,8 +213,8 @@ class DetectionImageAnnotator(object):
     def annotate(self):
         while not rospy.is_shutdown() and not self._stop:
             logs = self._db.query(
-                # UbdSceneImgLog._type, {"annotated": False}, limit=10
-                UbdSceneImgLog._type, {"annotated": False}, limit=3  # TESTING PURPOSE
+                UbdSceneImgLog._type, {"annotated": False}, limit=10
+                # UbdSceneImgLog._type, {"annotated": False}, limit=3  # TESTING PURPOSE
             )
             rospy.loginfo(
                 "Getting %d logs from ubd_scene_log collection" % len(logs)
@@ -231,12 +231,6 @@ class DetectionImageAnnotator(object):
                 # resetting
                 self._cd = list()
                 self._ubd = list()
-                log[0].annotated = True
-                self._db.update(
-                    log[0], message_query={
-                        "header.stamp.secs": log[0].header.stamp.secs
-                    }
-                )
                 rospy.sleep(1)
             inpt = raw_input("Stop now? [1/0]")
             try:
@@ -247,6 +241,13 @@ class DetectionImageAnnotator(object):
             if inpt:
                 self.save_accuracy()
                 self._stop = True
+            for log in logs:
+                log[0].annotated = True
+                self._db.update(
+                    log[0], message_query={
+                        "header.stamp.secs": log[0].header.stamp.secs
+                    }
+                )
         rospy.loginfo("Thanks!")
 
 
@@ -257,4 +258,3 @@ if __name__ == '__main__':
     args = parser.parse_args()
     dia = DetectionImageAnnotator(args.soma_config)
     dia.annotate()
-    rospy.spin()

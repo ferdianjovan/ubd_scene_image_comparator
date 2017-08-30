@@ -1,20 +1,24 @@
 #!/usr/bin/env python
 
+import yaml
 import rospy
 import datetime
 import argparse
+import getpass
 from std_msgs.msg import Header
 from sensor_msgs.msg import Image
 from region_observation.util import get_soma_info
 from visualization_msgs.msg import Marker, MarkerArray
 from mongodb_store.message_store import MessageStoreProxy
+from human_trajectory.visualisation import TrajectoryVisualisation
 from region_observation.util import create_line_string, is_intersected
 from ubd_scene_image_comparator.msg import UbdSceneImgLog, UbdSceneAccuracy
 
 
 class DetectionImageAnnotator(object):
 
-    def __init__(self, config):
+    def __init__(self, config, path="/home/%s/Pictures" % getpass.getuser()):
+        self.path = path
         self.regions, self.map = get_soma_info(config)
         self._stop = False
         self._img = Image()
@@ -27,8 +31,14 @@ class DetectionImageAnnotator(object):
         self.cd = {
             roi: {"TP": 0, "FN": 0, "FP": 0, "TN": 0} for roi in self.regions.keys()
         }
+        self.leg = {
+            roi: {"TP": 0, "FN": 0, "FP": 0, "TN": 0} for roi in self.regions.keys()
+        }
+        self.roi_activity = {roi: list() for roi in self.regions.keys()}
+        self.roi_non_activity = {roi: list() for roi in self.regions.keys()}
         self._db = MessageStoreProxy(collection="ubd_scene_log")
         self._db_store = MessageStoreProxy(collection="ubd_scene_accuracy")
+        self._trajvis = TrajectoryVisualisation(rospy.get_name()+"/leg")
         # visualisation stuff
         self._cd = list()
         self._cd_len = 0
@@ -66,11 +76,22 @@ class DetectionImageAnnotator(object):
             self.cd[log.region_id]["FN"] = log.cd_fn
             self.cd[log.region_id]["FP"] = log.cd_fp
             self.cd[log.region_id]["TN"] = log.cd_tn
+            self.leg[log.region_id]["TP"] = log.leg_tp
+            self.leg[log.region_id]["FN"] = log.leg_fn
+            self.leg[log.region_id]["FP"] = log.leg_fp
+            self.leg[log.region_id]["TN"] = log.leg_tn
             used_rois.append(log.region_id)
         rospy.loginfo("Loading...")
         rospy.loginfo("Activity: %s" % str(self.activity))
         rospy.loginfo("UBD: %s" % str(self.ubd))
         rospy.loginfo("Scene: %s" % str(self.cd))
+        rospy.loginfo("Leg: %s" % str(self.leg))
+        try:
+            self.roi_activity = yaml.load(open("%s/roi_activity.yaml" % self.path, "r"))
+            self.roi_non_activity = yaml.load(open("%s/roi_non_activity.yaml" % self.path, "r"))
+        except IOError:
+            self.roi_activity = {roi: list() for roi in self.regions.keys()}
+            self.roi_non_activity = {roi: list() for roi in self.regions.keys()}
 
     def save_accuracy(self):
         header = Header(1, rospy.Time.now(), "")
@@ -78,14 +99,23 @@ class DetectionImageAnnotator(object):
         rospy.loginfo("Activity: %s" % str(self.activity))
         rospy.loginfo("UBD: %s" % str(self.ubd))
         rospy.loginfo("Scene: %s" % str(self.cd))
+        rospy.loginfo("Leg: %s" % str(self.leg))
         for roi in self.regions.keys():
             log = UbdSceneAccuracy(
                 header, self.activity[roi]["Present"], self.activity[roi]["Absent"],
-                self.ubd[roi]["TP"], self.ubd[roi]["FN"], self.ubd[roi]["FP"], self.ubd[roi]["TN"],
+                self.ubd[roi]["TP"], self.ubd[roi]["FN"],
+                self.ubd[roi]["FP"], self.ubd[roi]["TN"],
                 self.cd[roi]["TP"], self.cd[roi]["FN"],
-                self.cd[roi]["FP"], self.cd[roi]["TN"], roi, self.map
+                self.cd[roi]["FP"], self.cd[roi]["TN"],
+                self.leg[roi]["TP"], self.leg[roi]["FN"],
+                self.leg[roi]["FP"], self.leg[roi]["TN"],
+                roi, self.map
             )
             self._db_store.insert(log)
+        with open("%s/roi_activity.yaml" % self.path, 'w') as f:
+            f.write(yaml.dump(self.roi_activity))
+        with open("%s/roi_non_activity.yaml" % self.path, 'w') as f:
+            f.write(yaml.dump(self.roi_non_activity))
 
     def pub_img(self, timer_event):
         self._pub.publish(self._img)
@@ -170,6 +200,50 @@ class DetectionImageAnnotator(object):
             else:
                 self.cd[roi]["TN"] += 1
 
+    def _leg_vis(self, log):
+        start_time = log[0].header.stamp - rospy.Duration(60)
+        end_time = log[0].header.stamp
+        query = {"$or": [
+            {"end_time.secs": {
+                "$gte": start_time.secs, "$lt": end_time.secs
+            }},
+            {"start_time.secs": {
+                "$gte": start_time.secs, "$lt": end_time.secs
+
+            }},
+            {
+                "start_time.secs": {"$lt": start_time.secs},
+                "end_time.secs": {"$gte": end_time.secs}
+            }
+        ]}
+        self._trajvis.update_query(query=query)
+        for traj in self._trajvis.trajs.traj.itervalues():
+            self._trajvis.visualize_trajectory(traj)
+
+    def _leg_annotation(self, activity_rois=list(), nonactivity_rois=list()):
+        leg_rois = list()
+        for traj in self._trajvis.trajs.traj.itervalues():
+            trajectory = traj.get_trajectory_message()
+            points = [
+                [
+                    pose.pose.position.x, pose.pose.position.y
+                ] for pose in trajectory.trajectory
+            ]
+            points = create_line_string(points)
+            for roi, region in self.regions.iteritems():
+                if is_intersected(region, points):
+                    leg_rois.append(roi)
+        for roi in activity_rois:
+            if roi in leg_rois:
+                self.leg[roi]["TP"] += 1
+            else:
+                self.leg[roi]["FN"] += 1
+        for roi in nonactivity_rois:
+            if roi in leg_rois:
+                self.leg[roi]["FP"] += 1
+            else:
+                self.leg[roi]["TN"] += 1
+
     def _activity_annotation(self, log):
         act_rois = list()
         rospy.logwarn(
@@ -194,6 +268,7 @@ class DetectionImageAnnotator(object):
             act_rois = list()
         for roi in act_rois:
             self.activity[roi]["Present"] += 1
+            self.roi_activity[roi].append((timestamp.secs / 60) * 60)
         # listing all regions which no activity happening from the image
         text = "Which regions with no activity within a minute around %s? \n" % str(datestamp)
         text += "Please select from %s, " % str(self.regions.keys())
@@ -208,6 +283,7 @@ class DetectionImageAnnotator(object):
             nact_rois = list()
         for roi in nact_rois:
             self.activity[roi]["Absent"] += 1
+            self.roi_non_activity[roi].append((timestamp.secs / 60) * 60)
         return act_rois, nact_rois
 
     def annotate(self):
@@ -224,10 +300,12 @@ class DetectionImageAnnotator(object):
                 self._img = log[0].image
                 self._ubd = log[0].ubd_pos
                 self._cd = log[0].cd_pos
+                self._leg_vis(log)
                 # annotation part
                 act_rois, nact_rois = self._activity_annotation(log)
                 self._ubd_annotation(log, act_rois, nact_rois)
                 self._cd_annotation(log, act_rois, nact_rois)
+                self._leg_annotation(act_rois, nact_rois)
                 # resetting
                 self._cd = list()
                 self._ubd = list()

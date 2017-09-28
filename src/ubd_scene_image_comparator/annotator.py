@@ -23,7 +23,7 @@ from simple_change_detector.msg import ChangeDetectionMsg
 
 class DetectionImageAnnotator(object):
 
-    def __init__(self, config, path="/home/%s/Pictures" % getpass.getuser()):
+    def __init__(self, config, path="/localhome/%s/Pictures" % getpass.getuser()):
         self.path = path
         self.regions, self.map = get_soma_info(config)
         self.topo_map = None
@@ -69,7 +69,10 @@ class DetectionImageAnnotator(object):
             rospy.get_param("mongodb_host", "localhost"),
             rospy.get_param("mongodb_port", 62345)
         ).message_store.upper_bodies
-        self._trajvis = TrajectoryVisualisation(rospy.get_name()+"/leg")
+        self._trajvis = TrajectoryVisualisation(
+            rospy.get_name()+"/leg",
+            {"start_time.secs": rospy.Time.now().secs}
+        )
         # visualisation stuff
         self._cd = list()
         self._cd_len = 0
@@ -440,8 +443,8 @@ class DetectionImageAnnotator(object):
     def annotate(self):
         while not rospy.is_shutdown() and not self._stop:
             logs = self._db.query(
-                UbdSceneImgLog._type, {"annotated": False}, limit=30
-                # UbdSceneImgLog._type, {"annotated": False}, limit=3  # TESTING PURPOSE
+                UbdSceneImgLog._type, {"annotated": False}, limit=30,
+                sort_query=[("header.stamp.secs",1)]
             )
             rospy.loginfo(
                 "Getting %d logs from ubd_scene_log collection" % len(logs)

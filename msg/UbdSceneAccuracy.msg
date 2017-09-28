@@ -14,4 +14,5 @@ int32 leg_fn
 int32 leg_fp
 int32 leg_tn
 string region_id
+string region_config
 string map

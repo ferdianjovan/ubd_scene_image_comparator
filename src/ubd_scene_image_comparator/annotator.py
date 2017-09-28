@@ -14,36 +14,69 @@ from human_trajectory.visualisation import TrajectoryVisualisation
 from region_observation.util import create_line_string, is_intersected
 from ubd_scene_image_comparator.msg import UbdSceneImgLog, UbdSceneAccuracy
 
+import pymongo
+from geometry_msgs.msg import Point
+from shapely.geometry import Polygon
+from strands_navigation_msgs.msg import TopologicalMap
+from simple_change_detector.msg import ChangeDetectionMsg
+
 
 class DetectionImageAnnotator(object):
 
     def __init__(self, config, path="/home/%s/Pictures" % getpass.getuser()):
         self.path = path
         self.regions, self.map = get_soma_info(config)
+        self.topo_map = None
+        self._get_waypoints()
+        self.topo_map = {
+            wp.name: Polygon([[wp.pose.position.x+i.x, wp.pose.position.y+i.y] for i in wp.verts]) for wp in self.topo_map.nodes
+        }
         self._stop = False
         self._img = Image()
         self.activity = {
-            roi: {"Present": 0, "Absent": 0} for roi in self.regions.keys()
+            roi: {
+                wp: {"Present": 0, "Absent": 0} for wp in self.topo_map
+            } for roi in self.regions.keys()
         }
         self.ubd = {
-            roi: {"TP": 0, "FN": 0, "FP": 0, "TN": 0} for roi in self.regions.keys()
+            roi: {
+                wp: {"TP": 0, "FN": 0, "FP": 0, "TN": 0} for wp in self.topo_map
+            } for roi in self.regions.keys()
         }
         self.cd = {
-            roi: {"TP": 0, "FN": 0, "FP": 0, "TN": 0} for roi in self.regions.keys()
+            roi: {
+                wp: {"TP": 0, "FN": 0, "FP": 0, "TN": 0} for wp in self.topo_map
+            } for roi in self.regions.keys()
         }
         self.leg = {
-            roi: {"TP": 0, "FN": 0, "FP": 0, "TN": 0} for roi in self.regions.keys()
+            roi: {
+                wp: {"TP": 0, "FN": 0, "FP": 0, "TN": 0} for wp in self.topo_map
+            } for roi in self.regions.keys()
         }
+        self.wp_history = dict()
         self.roi_activity = {roi: list() for roi in self.regions.keys()}
         self.roi_non_activity = {roi: list() for roi in self.regions.keys()}
+        self.roi_cd = {roi: list() for roi in self.regions.keys()}
+        # self.roi_non_cd = {roi: list() for roi in self.regions.keys()}
+        self.roi_ubd = {roi: list() for roi in self.regions.keys()}
+        # self.roi_non_ubd = {roi: list() for roi in self.regions.keys()}
+        self.roi_leg = {roi: list() for roi in self.regions.keys()}
+        # self.roi_non_leg = {roi: list() for roi in self.regions.keys()}
         self._db = MessageStoreProxy(collection="ubd_scene_log")
         self._db_store = MessageStoreProxy(collection="ubd_scene_accuracy")
+        self._db_change = MessageStoreProxy(collection="change_detection")
+        self._db_ubd = pymongo.MongoClient(
+            rospy.get_param("mongodb_host", "localhost"),
+            rospy.get_param("mongodb_port", 62345)
+        ).message_store.upper_bodies
         self._trajvis = TrajectoryVisualisation(rospy.get_name()+"/leg")
         # visualisation stuff
         self._cd = list()
         self._cd_len = 0
         self._ubd = list()
         self._ubd_len = 0
+        self._robot_pos = list()
+        self._robot_pos_len = 0
         self._pub = rospy.Publisher(rospy.get_name(), Image, queue_size=10)
         self._pub_cd_marker = rospy.Publisher(
             rospy.get_name()+"/cd_marker", MarkerArray, queue_size=10
@@ -51,71 +84,109 @@ class DetectionImageAnnotator(object):
         self._pub_ubd_marker = rospy.Publisher(
             rospy.get_name()+"/ubd_marker", MarkerArray, queue_size=10
         )
+        self._pub_robot_marker = rospy.Publisher(
+            rospy.get_name()+"/robot_marker", MarkerArray, queue_size=10
+        )
         self.load_accuracy()
         rospy.Timer(rospy.Duration(0.1), self.pub_img)
+
+    def _topo_map_cb(self, topo_map):
+        self.topo_map = topo_map
+
+    def _get_waypoints(self):
+        topo_sub = rospy.Subscriber(
+            "/topological_map", TopologicalMap, self._topo_map_cb, None, 10
+        )
+        rospy.loginfo("Getting information from /topological_map...")
+        while self.topo_map is None:
+            rospy.sleep(0.1)
+        topo_sub.unregister()
 
     def load_accuracy(self):
         logs = self._db_store.query(
             UbdSceneAccuracy._type,
             message_query={"map": self.map},
             sort_query=[("header.stamp.secs", -1)],
-            limit=len(self.regions.keys())
+            limit=len(self.regions.keys())*len(self.topo_map)
         )
         used_rois = list()
         for log in logs:
             log = log[0]
-            if log.region_id in used_rois:
+            if (log.region_id, log.region_config) in used_rois:
                 continue
-            self.activity[log.region_id]["Present"] = log.activity_present
-            self.activity[log.region_id]["Absent"] = log.activity_absent
-            self.ubd[log.region_id]["TP"] = log.ubd_tp
-            self.ubd[log.region_id]["FN"] = log.ubd_fn
-            self.ubd[log.region_id]["FP"] = log.ubd_fp
-            self.ubd[log.region_id]["TN"] = log.ubd_tn
-            self.cd[log.region_id]["TP"] = log.cd_tp
-            self.cd[log.region_id]["FN"] = log.cd_fn
-            self.cd[log.region_id]["FP"] = log.cd_fp
-            self.cd[log.region_id]["TN"] = log.cd_tn
-            self.leg[log.region_id]["TP"] = log.leg_tp
-            self.leg[log.region_id]["FN"] = log.leg_fn
-            self.leg[log.region_id]["FP"] = log.leg_fp
-            self.leg[log.region_id]["TN"] = log.leg_tn
-            used_rois.append(log.region_id)
-        rospy.loginfo("Loading...")
-        rospy.loginfo("Activity: %s" % str(self.activity))
-        rospy.loginfo("UBD: %s" % str(self.ubd))
-        rospy.loginfo("Scene: %s" % str(self.cd))
-        rospy.loginfo("Leg: %s" % str(self.leg))
+            self.activity[log.region_id][log.region_config]["Present"] = log.activity_present
+            self.activity[log.region_id][log.region_config]["Absent"] = log.activity_absent
+            self.ubd[log.region_id][log.region_config]["TP"] = log.ubd_tp
+            self.ubd[log.region_id][log.region_config]["FN"] = log.ubd_fn
+            self.ubd[log.region_id][log.region_config]["FP"] = log.ubd_fp
+            self.ubd[log.region_id][log.region_config]["TN"] = log.ubd_tn
+            self.cd[log.region_id][log.region_config]["TP"] = log.cd_tp
+            self.cd[log.region_id][log.region_config]["FN"] = log.cd_fn
+            self.cd[log.region_id][log.region_config]["FP"] = log.cd_fp
+            self.cd[log.region_id][log.region_config]["TN"] = log.cd_tn
+            self.leg[log.region_id][log.region_config]["TP"] = log.leg_tp
+            self.leg[log.region_id][log.region_config]["FN"] = log.leg_fn
+            self.leg[log.region_id][log.region_config]["FP"] = log.leg_fp
+            self.leg[log.region_id][log.region_config]["TN"] = log.leg_tn
+            used_rois.append((log.region_id, log.region_config))
+        # rospy.loginfo("Loading...")
+        # rospy.loginfo("Activity: %s" % str(self.activity))
+        # rospy.loginfo("UBD: %s" % str(self.ubd))
+        # rospy.loginfo("Scene: %s" % str(self.cd))
+        # rospy.loginfo("Leg: %s" % str(self.leg))
         try:
             self.roi_activity = yaml.load(open("%s/roi_activity.yaml" % self.path, "r"))
             self.roi_non_activity = yaml.load(open("%s/roi_non_activity.yaml" % self.path, "r"))
+            self.roi_cd = yaml.load(open("%s/roi_cd.yaml" % self.path, "r"))
+            # self.roi_non_cd = yaml.load(open("%s/roi_non_cd.yaml" % self.path, "r"))
+            self.roi_ubd = yaml.load(open("%s/roi_ubd.yaml" % self.path, "r"))
+            # self.roi_non_ubd = yaml.load(open("%s/roi_non_ubd.yaml" % self.path, "r"))
+            self.roi_leg = yaml.load(open("%s/roi_leg.yaml" % self.path, "r"))
+            # self.roi_non_leg = yaml.load(open("%s/roi_non_leg.yaml" % self.path, "r"))
+            self.wp_history = yaml.load(open("%s/wp_history.yaml" % self.path, "r"))
         except IOError:
             self.roi_activity = {roi: list() for roi in self.regions.keys()}
             self.roi_non_activity = {roi: list() for roi in self.regions.keys()}
+            self.roi_cd = {roi: list() for roi in self.regions.keys()}
+            # self.roi_non_cd = {roi: list() for roi in self.regions.keys()}
+            self.roi_ubd = {roi: list() for roi in self.regions.keys()}
+            # self.roi_non_ubd = {roi: list() for roi in self.regions.keys()}
+            self.roi_leg = {roi: list() for roi in self.regions.keys()}
+            # self.roi_non_leg = {roi: list() for roi in self.regions.keys()}
+            self.wp_history = dict()
 
     def save_accuracy(self):
         header = Header(1, rospy.Time.now(), "")
         rospy.loginfo("Storing...")
-        rospy.loginfo("Activity: %s" % str(self.activity))
-        rospy.loginfo("UBD: %s" % str(self.ubd))
-        rospy.loginfo("Scene: %s" % str(self.cd))
-        rospy.loginfo("Leg: %s" % str(self.leg))
+        # rospy.loginfo("Activity: %s" % str(self.activity))
+        # rospy.loginfo("UBD: %s" % str(self.ubd))
+        # rospy.loginfo("Scene: %s" % str(self.cd))
+        # rospy.loginfo("Leg: %s" % str(self.leg))
         for roi in self.regions.keys():
-            log = UbdSceneAccuracy(
-                header, self.activity[roi]["Present"], self.activity[roi]["Absent"],
-                self.ubd[roi]["TP"], self.ubd[roi]["FN"],
-                self.ubd[roi]["FP"], self.ubd[roi]["TN"],
-                self.cd[roi]["TP"], self.cd[roi]["FN"],
-                self.cd[roi]["FP"], self.cd[roi]["TN"],
-                self.leg[roi]["TP"], self.leg[roi]["FN"],
-                self.leg[roi]["FP"], self.leg[roi]["TN"],
-                roi, self.map
-            )
-            self._db_store.insert(log)
+            for wp in self.topo_map:
+                log = UbdSceneAccuracy(
+                    header, self.activity[roi][wp]["Present"], self.activity[roi][wp]["Absent"],
+                    self.ubd[roi][wp]["TP"], self.ubd[roi][wp]["FN"],
+                    self.ubd[roi][wp]["FP"], self.ubd[roi][wp]["TN"],
+                    self.cd[roi][wp]["TP"], self.cd[roi][wp]["FN"],
+                    self.cd[roi][wp]["FP"], self.cd[roi][wp]["TN"],
+                    self.leg[roi][wp]["TP"], self.leg[roi][wp]["FN"],
+                    self.leg[roi][wp]["FP"], self.leg[roi][wp]["TN"],
+                    roi, wp, self.map
+                )
+                self._db_store.insert(log)
         with open("%s/roi_activity.yaml" % self.path, 'w') as f:
             f.write(yaml.dump(self.roi_activity))
         with open("%s/roi_non_activity.yaml" % self.path, 'w') as f:
             f.write(yaml.dump(self.roi_non_activity))
+        with open("%s/roi_cd.yaml" % self.path, 'w') as f:
+            f.write(yaml.dump(self.roi_cd))
+        with open("%s/roi_ubd.yaml" % self.path, 'w') as f:
+            f.write(yaml.dump(self.roi_ubd))
+        with open("%s/roi_leg.yaml" % self.path, 'w') as f:
+            f.write(yaml.dump(self.roi_leg))
+        with open("%s/wp_history.yaml" % self.path, 'w') as f:
+            f.write(yaml.dump(self.wp_history))
 
     def pub_img(self, timer_event):
         self._pub.publish(self._img)
@@ -125,6 +196,9 @@ class DetectionImageAnnotator(object):
         ubd_markers = self._draw_detections(self._ubd, "ubd", self._ubd_len)
         self._pub_ubd_marker.publish(ubd_markers)
         self._ubd_len = len(self._ubd)
+        robot_markers = self._draw_detections(self._robot_pos, "robot", self._robot_pos_len)
+        self._pub_robot_marker.publish(robot_markers)
+        self._robot_pos_len = len(self._robot_pos)
 
     def _draw_detections(self, centroids, type="cd", length=0):
         markers = MarkerArray()
@@ -140,9 +214,12 @@ class DetectionImageAnnotator(object):
             if type == "cd":
                 marker.type = Marker.SPHERE
                 marker.color.b = 1.0
-            else:
+            elif type == "ubd":
                 marker.type = Marker.CUBE
                 marker.color.g = 1.0
+            else:
+                marker.type = Marker.CYLINDER
+                marker.color.r = 1.0
             marker.scale.x = 0.2
             marker.scale.y = 0.2
             marker.scale.z = 0.2
@@ -164,64 +241,69 @@ class DetectionImageAnnotator(object):
                 markers.markers.append(marker)
         return markers
 
-    def _ubd_annotation(self, log, activity_rois=list(), nonactivity_rois=list()):
+    def _ubd_annotation(self, log, activity_rois=list(), nonactivity_rois=list(), wp=""):
         ubd_rois = list()
-        for centroid in log[0].ubd_pos:
+        timestamp = log[0].header.stamp
+        for centroid in self._ubd:
             point = create_line_string([centroid.x, centroid.y])
             for roi, region in self.regions.iteritems():
                 if is_intersected(region, point):
                     ubd_rois.append(roi)
+                    self.roi_ubd[roi].append((timestamp.secs / 60) * 60)
         for roi in activity_rois:
             if roi in ubd_rois:
-                self.ubd[roi]["TP"] += 1
+                self.ubd[roi][wp]["TP"] += 1
             else:
-                self.ubd[roi]["FN"] += 1
+                self.ubd[roi][wp]["FN"] += 1
         for roi in nonactivity_rois:
             if roi in ubd_rois:
-                self.ubd[roi]["FP"] += 1
+                self.ubd[roi][wp]["FP"] += 1
             else:
-                self.ubd[roi]["TN"] += 1
+                self.ubd[roi][wp]["TN"] += 1
 
-    def _cd_annotation(self, log, activity_rois=list(), nonactivity_rois=list()):
+    def _cd_annotation(self, log, activity_rois=list(), nonactivity_rois=list(), wp=""):
         cd_rois = list()
-        for centroid in log[0].cd_pos:
+        timestamp = log[0].header.stamp
+        for centroid in self._cd:
             point = create_line_string([centroid.x, centroid.y])
             for roi, region in self.regions.iteritems():
                 if is_intersected(region, point):
                     cd_rois.append(roi)
+                    self.roi_cd[roi].append((timestamp.secs / 60) * 60)
         for roi in activity_rois:
             if roi in cd_rois:
-                self.cd[roi]["TP"] += 1
+                self.cd[roi][wp]["TP"] += 1
             else:
-                self.cd[roi]["FN"] += 1
+                self.cd[roi][wp]["FN"] += 1
         for roi in nonactivity_rois:
             if roi in cd_rois:
-                self.cd[roi]["FP"] += 1
+                self.cd[roi][wp]["FP"] += 1
             else:
-                self.cd[roi]["TN"] += 1
+                self.cd[roi][wp]["TN"] += 1
 
     def _leg_vis(self, log):
-        start_time = log[0].header.stamp - rospy.Duration(60)
-        end_time = log[0].header.stamp
+        start_time = (log[0].header.stamp.secs / 60) * 60
+        end_time = start_time + 60
         query = {"$or": [
             {"end_time.secs": {
-                "$gte": start_time.secs, "$lt": end_time.secs
+                "$gte": start_time, "$lt": end_time
             }},
             {"start_time.secs": {
-                "$gte": start_time.secs, "$lt": end_time.secs
+                "$gte": start_time, "$lt": end_time
 
             }},
             {
-                "start_time.secs": {"$lt": start_time.secs},
-                "end_time.secs": {"$gte": end_time.secs}
+                "start_time.secs": {"$lt": start_time},
+                "end_time.secs": {"$gte": end_time}
             }
         ]}
         self._trajvis.update_query(query=query)
         for traj in self._trajvis.trajs.traj.itervalues():
             self._trajvis.visualize_trajectory(traj)
 
-    def _leg_annotation(self, activity_rois=list(), nonactivity_rois=list()):
+    def _leg_annotation(self, log, activity_rois=list(), nonactivity_rois=list(), wp=""):
         leg_rois = list()
+        timestamp = log[0].header.stamp
         for traj in self._trajvis.trajs.traj.itervalues():
             trajectory = traj.get_trajectory_message()
             points = [
@@ -233,16 +315,17 @@ class DetectionImageAnnotator(object):
             for roi, region in self.regions.iteritems():
                 if is_intersected(region, points):
                     leg_rois.append(roi)
+                    self.roi_leg[roi].append((timestamp.secs / 60) * 60)
         for roi in activity_rois:
             if roi in leg_rois:
-                self.leg[roi]["TP"] += 1
+                self.leg[roi][wp]["TP"] += 1
             else:
-                self.leg[roi]["FN"] += 1
+                self.leg[roi][wp]["FN"] += 1
         for roi in nonactivity_rois:
             if roi in leg_rois:
-                self.leg[roi]["FP"] += 1
+                self.leg[roi][wp]["FP"] += 1
             else:
-                self.leg[roi]["TN"] += 1
+                self.leg[roi][wp]["TN"] += 1
 
     def _activity_annotation(self, log):
         act_rois = list()
@@ -254,6 +337,29 @@ class DetectionImageAnnotator(object):
         )
         timestamp = log[0].header.stamp
         datestamp = datetime.datetime.fromtimestamp(timestamp.secs)
+        wp = list()
+        for pose in self._robot_pos:
+            point = create_line_string([pose.x, pose.y])
+            for wp_name, wp_region in self.topo_map.iteritems():
+                if is_intersected(wp_region, point):
+                    wp.append(wp_name)
+        if wp == list():
+            inpt = ""
+            while inpt not in self.topo_map.keys():
+                text = "Manual, From which region did the robot observed around %s? \n" % str(datestamp)
+                text += "Please select from %s:" % str(self.topo_map.keys())
+                inpt = raw_input(text)
+            wp = inpt
+        elif len(list(set(wp))) > 1:
+            inpt = ""
+            while inpt not in self.topo_map.keys():
+                text = "From which region did the robot observed around %s? \n" % str(datestamp)
+                text += "Please select from %s:" % str(list(set(wp)))
+                inpt = raw_input(text)
+            wp = inpt
+        else:
+            wp = wp[0]
+        self.wp_history.update({(timestamp.secs/60)*60: wp})
         # listing all regions which activity happened from the image
         text = "Which regions did the activity happen within a minute around %s? \n" % str(datestamp)
         text += "Please select from %s, " % str(self.regions.keys())
@@ -267,7 +373,7 @@ class DetectionImageAnnotator(object):
         if '' in act_rois and len(act_rois) == 1:
             act_rois = list()
         for roi in act_rois:
-            self.activity[roi]["Present"] += 1
+            self.activity[roi][wp]["Present"] += 1
             self.roi_activity[roi].append((timestamp.secs / 60) * 60)
         # listing all regions which no activity happening from the image
         text = "Which regions with no activity within a minute around %s? \n" % str(datestamp)
@@ -282,14 +388,59 @@ class DetectionImageAnnotator(object):
         if '' in nact_rois and len(nact_rois) == 1:
             nact_rois = list()
         for roi in nact_rois:
-            self.activity[roi]["Absent"] += 1
+            self.activity[roi][wp]["Absent"] += 1
             self.roi_non_activity[roi].append((timestamp.secs / 60) * 60)
-        return act_rois, nact_rois
+        return act_rois, nact_rois, wp
+
+    def get_cd_pos(self, stamp):
+        robot = list()
+        detections = list()
+        start_time = (stamp.secs / 60) * 60
+        end_time = start_time + 60
+        logs = self._db_change.query(
+            ChangeDetectionMsg._type,
+            {"header.stamp.secs": {"$gte": start_time, "$lt": end_time}}
+        )
+        for log in logs:
+            detections.extend(log[0].object_centroids)
+            robot.append(log[0].robot_pose.position)
+        return detections, robot
+
+    def get_ubd_pos(self, stamp):
+        robot = list()
+        detections = list()
+        start_time = (stamp.secs / 60) * 60
+        end_time = start_time + 60
+        query = {
+            "header.stamp.secs": {"$gte": start_time, "$lt": end_time},
+            "$where": "this.ubd_pos.length > 0"
+        }
+        project = {
+            "header.stamp.secs": 1, "ubd_pos": 1, "robot.position.x": 1,
+            "robot.position.y": 1, "robot.position.z": 1
+        }
+        # logs = self._db.query(
+        logs = self._db_ubd.find(query, project).sort(
+            "header.stamp.secs", pymongo.ASCENDING
+        )
+        for log in logs:
+            temp = list()
+            for i in log["ubd_pos"]:
+                temp.append(Point(x=i["x"], y=i["y"], z=i["z"]))
+            detections.extend(temp)
+            robot.append(
+                Point(
+                    x=log["robot"]["position"]["x"],
+                    y=log["robot"]["position"]["y"],
+                    z=log["robot"]["position"]["z"]
+                )
+            )
+        return detections, robot
 
     def annotate(self):
         while not rospy.is_shutdown() and not self._stop:
             logs = self._db.query(
-                UbdSceneImgLog._type, {"annotated": False}, limit=10
+                UbdSceneImgLog._type, {"annotated": False}, limit=30
                 # UbdSceneImgLog._type, {"annotated": False}, limit=3  # TESTING PURPOSE
             )
             rospy.loginfo(
@@ -298,14 +449,17 @@ class DetectionImageAnnotator(object):
             # projection_query={"robot_data": 0, "skeleton_data": 0}
             for log in logs:
                 self._img = log[0].image
-                self._ubd = log[0].ubd_pos
-                self._cd = log[0].cd_pos
+                self._ubd, ubd_robot = self.get_ubd_pos(log[0].header.stamp)
+                self._cd, cd_robot = self.get_cd_pos(log[0].header.stamp)
+                self._robot_pos = ubd_robot + cd_robot
+                # self._ubd = log[0].ubd_pos
+                # self._cd = log[0].cd_pos
                 self._leg_vis(log)
                 # annotation part
-                act_rois, nact_rois = self._activity_annotation(log)
-                self._ubd_annotation(log, act_rois, nact_rois)
-                self._cd_annotation(log, act_rois, nact_rois)
-                self._leg_annotation(act_rois, nact_rois)
+                act_rois, nact_rois, wp = self._activity_annotation(log)
+                self._ubd_annotation(log, act_rois, nact_rois, wp)
+                self._cd_annotation(log, act_rois, nact_rois, wp)
+                self._leg_annotation(log, act_rois, nact_rois, wp)
                 # resetting
                 self._cd = list()
                 self._ubd = list()
